@@ -4,13 +4,13 @@ tests/test_mesh_nd.py
 Basic tests for MeshND behavior (gaussian add and normalization flag).
 Run with: pytest -q
 """
-from algos.mesh import MeshND
+from mesh import MeshND
 
 
 def test_2d_gaussian_center_greater_than_neighbor():
-    mesh = MeshND(bounds=[(0.0, 1.0), (0.0, 1.0)], cells=[20, 20])
+    mesh = MeshND(bounds=[(0.0, 1.0), (0.0, 1.0)], cells=[20, 20], radius=0.15, amount = 1.0)
     center = [0.5, 0.5]
-    mesh.add(center, amount=1.0, radius=0.15, mode="gaussian", normalize=False)
+    mesh.add(center)
     counts = mesh.get_counts()
     idx_center = mesh._nearest_index(center)
     cx, cy = idx_center
@@ -28,3 +28,5 @@ def test_out_of_bounds_raises():
         assert False, "Expected ValueError for out-of-bounds point"
     except ValueError:
         pass
+
+test_2d_gaussian_center_greater_than_neighbor()
