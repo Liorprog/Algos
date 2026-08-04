@@ -14,13 +14,37 @@ def test_normalize_zero_small_and_divide_large():
     mesh._set_at((4, 4), 0.5)    # medium
     mesh._set_at((1, 3), 0.02)   # small but above tiny noise
 
-    # apply normalize: zero below 0.01, divide above 1.0 by 5
-    mesh.normalize_counts(low_threshold=0.01, zero_small=True, high_threshold=1.0, divide_const=5.0)
+    # Since the maximum is above 1, divide every retained value by 5.
+    mesh.normalize_counts(
+        low_threshold=0.01,
+        zero_small=True,
+        high_threshold=1.0,
+        divide_const=5.0,
+    )
 
     assert mesh._get_at((0, 0)) == 0.0
     assert abs(mesh._get_at((2, 2)) - 2.0) < 1e-12
-    assert abs(mesh._get_at((4, 4)) - 0.5) < 1e-12
-    assert abs(mesh._get_at((1, 3)) - 0.02) < 1e-12
+    assert abs(mesh._get_at((4, 4)) - 0.1) < 1e-12
+    assert abs(mesh._get_at((1, 3)) - 0.004) < 1e-12
+
+
+def test_normalize_empty_mesh():
+    mesh = MeshND(bounds=[(0, 1)], cells=[3])
+
+    mesh.normalize_counts()
+
+    assert mesh.get_counts() == {}
+
+
+def test_normalize_does_not_divide_when_max_is_below_threshold():
+    mesh = MeshND(bounds=[(0, 1)], cells=[3])
+    mesh._set_at((0,), 2.0)
+    mesh._set_at((1,), 4.0)
+
+    mesh.normalize_counts(high_threshold=5.0, divide_const=2.0)
+
+    assert mesh._get_at((0,)) == 2.0
+    assert mesh._get_at((1,)) == 4.0
 
 
 def test_get_peaks_simple():
