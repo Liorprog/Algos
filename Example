@@ -36,7 +36,7 @@ def main():
 
     # Post-process
     mesh.normalize_counts(low_threshold=0.12, zero_small=True,
-                          high_threshold=1.0, divide_const=2.0, cap_only=False)
+                          high_threshold=1.0, divide_const=2.0)
 
     print("\nCounts after normalize_counts(low_threshold=0.12, high_threshold=1.0, divide_const=2.0):")
     for idx, v in flatten_counts(mesh.get_counts()):

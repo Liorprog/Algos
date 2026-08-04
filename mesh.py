@@ -28,7 +28,6 @@ class MeshND:
         self.radius = radius
         self.sigma = self.radius / 3.0
         self.amount = amount
-        self.max_val = 0.0
         for (mn, mx) in self.bounds:
             if mx <= mn:
                 raise ValueError("Each bound must have max > min.")
@@ -196,10 +195,23 @@ class MeshND:
             zero_small: bool = True,
             high_threshold: Optional[float] = None,
             divide_const: Optional[float] = None,
-            cap_only: bool = False,
     ) -> None:
+        """Apply low-value filtering and optional whole-mesh scaling.
+
+        When the largest count exceeds ``high_threshold``, every retained
+        count is divided by ``divide_const``. This preserves the relative
+        shape of the mesh instead of changing only its largest cells.
+        """
         if low_threshold is None:
             low_threshold = 0.0
+
+        max_value = max(self.counts.values(), default=0.0)
+        divide_all = (
+            high_threshold is not None
+            and max_value > high_threshold
+            and divide_const is not None
+            and divide_const != 0.0
+        )
 
         # list(...) is needed because cells may be removed during iteration.
         for idx, value in list(self.counts.items()):
@@ -207,11 +219,10 @@ class MeshND:
                 self.counts.pop(idx, None)
                 continue
 
-            if high_threshold is not None and value > high_threshold:
-                if divide_const is not None and divide_const != 0.0:
-                    self._set_at(idx, value / divide_const)
-                elif cap_only:
-                    self._set_at(idx, float(high_threshold))
+            if divide_all:
+                value /= divide_const
+
+            self._set_at(idx, value)
 
     def get_peaks(
             self,
