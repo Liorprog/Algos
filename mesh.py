@@ -18,7 +18,8 @@ class MeshND:
     def __init__(self, bounds: Sequence[Tuple[float, float]],
                        cells: Sequence[int],
                        radius: float = 0.15,
-                       amount: float = 1.0):
+                       low_thresh: float = 0.01,
+                       high_thresh: float = 10):
         if len(bounds) != len(cells):
             raise ValueError("bounds and cells must have the same length (ndim).")
         self.ndim = len(bounds)
@@ -27,7 +28,9 @@ class MeshND:
         self.cells: List[int] = [int(c) for c in cells]
         self.radius = radius
         self.sigma = self.radius / 3.0
-        self.amount = amount
+        self.low_thresh = low_thresh
+        self.high_thresh = high_thresh
+        self.max_value = 0.0
         for (mn, mx) in self.bounds:
             if mx <= mn:
                 raise ValueError("Each bound must have max > min.")
@@ -50,15 +53,6 @@ class MeshND:
         # Create nested counts structure
         self.counts: Dict[Tuple[int, ...], float] = {}
 
-    # -----------------------
-    # Nested-list utilities
-    # -----------------------
-    def _make_nested_list(self, sizes: Sequence[int], fill):
-        """Recursively create nested lists of shape sizes filled with `fill`."""
-        if len(sizes) == 1:
-            return [fill for _ in range(sizes[0])]
-        return [self._make_nested_list(sizes[1:], fill) for _ in range(sizes[0])]
-
     def _get_at(self, idx: Tuple[int, ...]) -> float:
         """Return the value at idx, or zero if the cell is empty."""
         return self.counts.get(idx, 0.0)
@@ -66,20 +60,14 @@ class MeshND:
     def _set_at(self, idx: Tuple[int, ...], value: float) -> None:
         """Set a cell value. Remove it if the value is zero."""
         value = float(value)
-
-        if value == 0.0:
-            self.counts.pop(idx, None)
-        else:
-            self.counts[idx] = value
+        self.counts[idx] = value
+        if value > self.max_value:
+            self.max_value = value
 
     def _add_at(self, idx: Tuple[int, ...], delta: float) -> None:
         """Add delta to a cell. Do not keep zero-valued cells."""
         new_value = self.counts.get(idx, 0.0) + delta
-
-        if new_value == 0.0:
-            self.counts.pop(idx, None)
-        else:
-            self.counts[idx] = new_value
+        self._set_at(idx, new_value)
 
     def _all_indices(self) -> Iterable[Tuple[int, ...]]:
         """Yield all valid index tuples in the grid (product of ranges)."""
@@ -91,9 +79,7 @@ class MeshND:
     # -----------------------
     def reset(self) -> None:
         self.counts.clear()
-
-    def get_counts(self) -> Dict[Tuple[int, ...], float]:
-        return self.counts
+        self.max_value = 0.0
 
     def get_centers(self) -> List[List[float]]:
         """Return per-axis centers lists."""
@@ -141,19 +127,12 @@ class MeshND:
             return None, None
         return min_i, max_i
 
-    def normalize_weights(self, weights: Dict[Tuple[int, ...], float]) -> Dict[Tuple[int, ...], float]:
-        """Normalize a weights dict so their sum equals 1. Returns new dict."""
-        total = sum(weights.values())
-        if total == 0:
-            return weights.copy()
-        return {idx: w / total for idx, w in weights.items()}
-
     def add(
         self,
         point: Sequence[float],
     ) -> None:
         """
-        Add `amount` distributed to the nearest cell and neighbors within `radius`.
+        Add values distributed to the nearest cell and neighbors within `self.radius`.
 
         Args:
             point: coordinate sequence of length ndim.
@@ -177,11 +156,8 @@ class MeshND:
             if dist > self.radius:
                 continue  # outside influence
 
-
-            w = math.exp(-0.5 * (dist / self.sigma) ** 2)
-
-            if w > 0.001:
-                self._add_at(idx, self.amount * w)
+            val = math.exp(-0.5 * (dist / self.sigma) ** 2)
+            self._add_at(idx, val)
 
     def get(self, *idx):
         return self._get_at(idx)
@@ -189,73 +165,46 @@ class MeshND:
     # -----------------------
     # Post-processing helpers
     # -----------------------
-    def normalize_counts(
-            self,
-            low_threshold: float = 0.0,
-            zero_small: bool = True,
-            high_threshold: Optional[float] = None,
-            divide_const: Optional[float] = None,
-    ) -> None:
+    def normalize_counts(self) -> None:
         """Apply low-value filtering and optional whole-mesh scaling.
 
         When the largest count exceeds ``high_threshold``, every retained
         count is divided by ``divide_const``. This preserves the relative
         shape of the mesh instead of changing only its largest cells.
         """
-        if low_threshold is None:
-            low_threshold = 0.0
+        if self.max_value < self.high_thresh:
+            return
 
-        max_value = max(self.counts.values(), default=0.0)
-        divide_all = (
-            high_threshold is not None
-            and max_value > high_threshold
-            and divide_const is not None
-            and divide_const != 0.0
-        )
+        divide_const = self.max_value / self.high_thresh
 
-        # list(...) is needed because cells may be removed during iteration.
-        for idx, value in list(self.counts.items()):
-            if zero_small and value < low_threshold:
-                self.counts.pop(idx, None)
+        old_counts = list(self.counts.items())
+        self.reset()
+
+        for idx, value in old_counts:
+            value /= divide_const
+            if value < self.low_thresh:
                 continue
-
-            if divide_all:
-                value /= divide_const
-
             self._set_at(idx, value)
 
     def get_peaks(
             self,
-            min_value: float = 0.0,
-            neighborhood: int = 1,
+            param: float = 2.0,
     ) -> List[Tuple[Tuple[int, ...], float]]:
-        peaks = []
+        """Return cells valued from ``max_value / param`` through ``max_value``."""
+        if param <= 0:
+            raise ValueError("param must be greater than zero.")
+        if not self.counts:
+            return []
 
-        for idx, value in self.counts.items():
-            if value < min_value:
-                continue
+        max_value = self.max_value
+        min_value = max_value / param
+        peaks = [
+            (idx, value)
+            for idx, value in self.counts.items()
+            if value >= min_value
+        ]
 
-            neighbor_ranges = []
-
-            for dimension, cell_index in enumerate(idx):
-                start = max(0, cell_index - neighborhood)
-                end = min(self.cells[dimension] - 1, cell_index + neighborhood)
-                neighbor_ranges.append(range(start, end + 1))
-
-            is_local_max = True
-
-            for neighbor_idx in itertools.product(*neighbor_ranges):
-                if neighbor_idx == idx:
-                    continue
-
-                if self.counts.get(neighbor_idx, 0.0) > value:
-                    is_local_max = False
-                    break
-
-            if is_local_max:
-                peaks.append((idx, value))
-
-        return peaks
+        return sorted(peaks, key=lambda peak: peak[1], reverse=True)
 
     # Utility repr
     def __repr__(self):

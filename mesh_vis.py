@@ -7,7 +7,7 @@ Features:
 - Shows the mesh as a heatmap (rectangles colored by amplitude).
 - Hover to see index, center coordinate and value (tooltip).
 - Optionally add points by clicking the heatmap.
-- Normalize the mesh using configurable thresholds and divisor.
+- Normalize the mesh using its configured thresholds.
 - Optional overlay of peaks (index tuples).
 - Save view as PNG via File -> Save as PNG.
 
@@ -20,7 +20,7 @@ Usage:
 
     mesh = MeshND(bounds=[(0,1),(0,1)], cells=[50,50])
     ... add points ...
-    app = MeshWindow(mesh, peaks=mesh.get_peaks(min_value=...))
+    app = MeshWindow(mesh, peaks=mesh.get_peaks(param=2.0))
     app.show()
     QApplication.exec_()
 
@@ -31,7 +31,6 @@ Notes:
   and adapt Q* names accordingly (they are mostly identical).
 """
 from typing import List, Tuple, Optional
-import math
 
 # Use PyQt5 by default. If you prefer PySide6, replace imports accordingly.
 from PyQt5 import QtWidgets, QtGui, QtCore
@@ -45,6 +44,8 @@ class MeshVisualizer(QtWidgets.QWidget):
     """
 
     point_added = QtCore.pyqtSignal(float, float)
+    true_point_selected = QtCore.pyqtSignal(float, float)
+    true_point_remove_requested = QtCore.pyqtSignal(float, float)
 
     def __init__(
         self,
@@ -57,11 +58,11 @@ class MeshVisualizer(QtWidgets.QWidget):
             raise ValueError("MeshVisualizer currently only supports 2D meshes.")
         self.mesh = mesh
         self.show_values = show_values
+        self.peaks = []
+        self.true_points = []
         self.add_points_enabled = False
-        self.auto_color_scale = True
-        self.fixed_color_max = 1.0
-        # caches
-        self._max_value = None
+        self.true_point_selection_enabled = False
+        self.fixed_color_max = max(5.0 * mesh.high_thresh, 1e-12)
         self.setMouseTracking(True)  # track mouse to show tooltips
         self.setMinimumSize(300, 300)
 
@@ -69,16 +70,20 @@ class MeshVisualizer(QtWidgets.QWidget):
         if mesh.ndim != 2:
             raise ValueError("MeshVisualizer currently only supports 2D meshes.")
         self.mesh = mesh
-        self._max_value = None
+        self.fixed_color_max = max(5.0 * mesh.high_thresh, 1e-12)
         self.update()
 
     def set_peaks(self, peaks: List[Tuple[Tuple[int, int], float]]):
         self.peaks = peaks or []
         self.update()
 
+    def set_true_points(self, points: List[Tuple[float, float]]):
+        self.true_points = points or []
+        self.update()
+
     def refresh(self):
-        """Clear cached color scaling and repaint the mesh."""
-        self._max_value = None
+        """Update the fixed color scale and repaint the mesh."""
+        self.fixed_color_max = max(5.0 * self.mesh.high_thresh, 1e-12)
         self.update()
 
     def set_add_points_enabled(self, enabled: bool):
@@ -86,14 +91,10 @@ class MeshVisualizer(QtWidgets.QWidget):
         cursor = QtCore.Qt.CrossCursor if enabled else QtCore.Qt.ArrowCursor
         self.setCursor(cursor)
 
-    def set_auto_color_scale(self, enabled: bool):
-        self.auto_color_scale = enabled
-        self.refresh()
-
-    def set_fixed_color_max(self, value: float):
-        self.fixed_color_max = max(float(value), 1e-12)
-        if not self.auto_color_scale:
-            self.update()
+    def set_true_point_selection_enabled(self, enabled: bool):
+        self.true_point_selection_enabled = enabled
+        cursor = QtCore.Qt.CrossCursor if enabled else QtCore.Qt.ArrowCursor
+        self.setCursor(cursor)
 
     def sizeHint(self):
         return QtCore.QSize(600, 600)
@@ -102,7 +103,7 @@ class MeshVisualizer(QtWidgets.QWidget):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
 
-        counts = self.mesh.get_counts()
+        counts = self.mesh.counts
         nx = self.mesh.cells[0]
         ny = self.mesh.cells[1]
 
@@ -113,20 +114,9 @@ class MeshVisualizer(QtWidgets.QWidget):
         cell_w = w / nx
         cell_h = h / ny
 
-        # Auto scale highlights relative differences. A fixed scale keeps colors
-        # comparable as points are added, clipping values above the limit to red.
-        if self.auto_color_scale:
-            if self._max_value is None:
-                m = 0.0
-                for i in range(nx):
-                    for j in range(ny):
-                        v = self.mesh.get(i,j)
-                        if v > m:
-                            m = v
-                self._max_value = m if m > 0 else 1.0
-            maxv = self._max_value
-        else:
-            maxv = self.fixed_color_max
+        # Keep colors comparable over time. Values at five times high_thresh
+        # (and above) use the hottest color.
+        maxv = self.fixed_color_max
 
         # draw cells
         for i in range(nx):
@@ -150,23 +140,35 @@ class MeshVisualizer(QtWidgets.QWidget):
             ypos = j * cell_h
             painter.drawLine(QtCore.QLineF(0, ypos, w, ypos))
 
-        # # draw peaks as small circles with labels
-        # if self.peaks:
-        #     pen = QtGui.QPen(QtGui.QColor(255, 255, 255))
-        #     pen.setWidth(2)
-        #     painter.setPen(pen)
-        #     brush = QtGui.QBrush(QtGui.QColor(255, 0, 0, 200))
-        #     painter.setBrush(brush)
-        #     for idx, val in self.peaks:
-        #         i, j = idx
-        #         cx = (i + 0.5) * cell_w
-        #         cy = (j + 0.5) * cell_h
-        #         radius = min(cell_w, cell_h) * 0.3
-        #         painter.drawEllipse(QtCore.QPointF(cx, cy), radius, radius)
-        #         # small label
-        #         painter.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255)))
-        #         painter.drawText(QtCore.QPointF(cx + radius + 2, cy), f"{round(val,3)}")
-        #
+        # Peak candidates are cells in the global max_value/param range.
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, True)
+        if self.peaks:
+            peak_pen = QtGui.QPen(QtGui.QColor(255, 255, 255, 230))
+            peak_pen.setWidth(2)
+            painter.setPen(peak_pen)
+            painter.setBrush(QtCore.Qt.NoBrush)
+            radius = max(2.0, min(cell_w, cell_h) * 0.35)
+            for idx, _value in self.peaks:
+                i, j = idx
+                center = QtCore.QPointF((i + 0.5) * cell_w, (j + 0.5) * cell_h)
+                painter.drawEllipse(center, radius, radius)
+
+        # Ground-truth points are fixed red targets for comparison.
+        if self.true_points:
+            true_pen = QtGui.QPen(QtGui.QColor(255, 40, 40))
+            true_pen.setWidth(3)
+            painter.setPen(true_pen)
+            painter.setBrush(QtCore.Qt.NoBrush)
+            x_min, x_max = self.mesh.bounds[0]
+            y_min, y_max = self.mesh.bounds[1]
+            radius = 7.0
+            for x_value, y_value in self.true_points:
+                x = (x_value - x_min) / (x_max - x_min) * w
+                y = (y_value - y_min) / (y_max - y_min) * h
+                painter.drawEllipse(QtCore.QPointF(x, y), radius, radius)
+                painter.drawLine(QtCore.QLineF(x - radius, y, x + radius, y))
+                painter.drawLine(QtCore.QLineF(x, y - radius, x, y + radius))
+
         # # optionally draw numeric values (only if requested and scale allows)
         # if self.show_values:
         #     painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0)))
@@ -218,14 +220,31 @@ class MeshVisualizer(QtWidgets.QWidget):
         QtWidgets.QToolTip.showText(event.globalPos(), tip, self)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent):
+        if self.true_point_selection_enabled and event.button() in (
+                QtCore.Qt.LeftButton, QtCore.Qt.RightButton):
+            x, y = self._event_coordinates(event)
+            if event.button() == QtCore.Qt.LeftButton:
+                self.true_point_selected.emit(x, y)
+            else:
+                self.true_point_remove_requested.emit(x, y)
+            return
+
         if not self.add_points_enabled or event.button() != QtCore.Qt.LeftButton:
             super().mousePressEvent(event)
             return
 
+        x, y = self._event_coordinates(event)
+        self.mesh.add((x, y))
+        self.refresh()
+        self.point_added.emit(x, y)
+
+    def _event_coordinates(self, event: QtGui.QMouseEvent):
+        """Map a mouse event to coordinates inside the mesh bounds."""
+
         width = self.width()
         height = self.height()
         if width <= 0 or height <= 0:
-            return
+            return 0.0, 0.0
 
         # The drawing maps axis 0 left-to-right and axis 1 top-to-bottom.
         x_fraction = max(0.0, min(1.0, event.pos().x() / width))
@@ -234,10 +253,7 @@ class MeshVisualizer(QtWidgets.QWidget):
         y_min, y_max = self.mesh.bounds[1]
         x = x_min + x_fraction * (x_max - x_min)
         y = y_min + y_fraction * (y_max - y_min)
-
-        self.mesh.add((x, y))
-        self.refresh()
-        self.point_added.emit(x, y)
+        return x, y
 
     def leaveEvent(self, event):
         QtWidgets.QToolTip.hideText()
@@ -252,11 +268,12 @@ class MeshVisualizer(QtWidgets.QWidget):
 class MeshWindow(QtWidgets.QMainWindow):
     """Simple QMainWindow wrapper providing a menu and the MeshVisualizer as central widget."""
 
-    def __init__(self, mesh, peaks=None, show_values=False, parent=None):
+    def __init__(self, mesh, peaks=None, true_points=None, show_values=False, parent=None):
         super().__init__(parent)
         self.setWindowTitle("MeshND Visualizer")
         self.visualizer = MeshVisualizer(mesh, show_values=show_values)
         self.visualizer.set_peaks(peaks)
+        self.visualizer.set_true_points(true_points)
         self._create_central_widget()
         self._create_menu()
 
@@ -272,31 +289,18 @@ class MeshWindow(QtWidgets.QMainWindow):
         controls.addWidget(self.add_points_checkbox)
 
         controls.addSpacing(12)
-        self.auto_scale_checkbox = QtWidgets.QCheckBox("Auto colors")
-        self.auto_scale_checkbox.setChecked(True)
-        self.auto_scale_checkbox.toggled.connect(self._on_auto_scale_toggled)
-        controls.addWidget(self.auto_scale_checkbox)
-
-        self.color_max_input = self._make_number_input(1.0)
-        self.color_max_input.setMinimum(0.000001)
-        self.color_max_input.setEnabled(False)
-        self.color_max_input.valueChanged.connect(
-            self.visualizer.set_fixed_color_max
+        self.low_threshold_input = self._make_number_input(
+            self.visualizer.mesh.low_thresh
         )
-        controls.addWidget(QtWidgets.QLabel("Color max:"))
-        controls.addWidget(self.color_max_input)
-
-        controls.addSpacing(12)
-        self.low_threshold_input = self._make_number_input(0.0)
-        self.high_threshold_input = self._make_number_input(1.0)
-        self.divide_const_input = self._make_number_input(2.0)
+        self.high_threshold_input = self._make_number_input(
+            self.visualizer.mesh.high_thresh
+        )
+        self.high_threshold_input.setMinimum(0.000001)
 
         controls.addWidget(QtWidgets.QLabel("Low threshold:"))
         controls.addWidget(self.low_threshold_input)
         controls.addWidget(QtWidgets.QLabel("High threshold:"))
         controls.addWidget(self.high_threshold_input)
-        controls.addWidget(QtWidgets.QLabel("Divide by:"))
-        controls.addWidget(self.divide_const_input)
 
         normalize_button = QtWidgets.QPushButton("Normalize")
         normalize_button.clicked.connect(self._on_normalize)
@@ -313,10 +317,6 @@ class MeshWindow(QtWidgets.QMainWindow):
             )
         )
 
-    def _on_auto_scale_toggled(self, enabled):
-        self.color_max_input.setEnabled(not enabled)
-        self.visualizer.set_auto_color_scale(enabled)
-
     @staticmethod
     def _make_number_input(value):
         field = QtWidgets.QDoubleSpinBox()
@@ -326,11 +326,9 @@ class MeshWindow(QtWidgets.QMainWindow):
         return field
 
     def _on_normalize(self):
-        self.visualizer.mesh.normalize_counts(
-            low_threshold=self.low_threshold_input.value(),
-            high_threshold=self.high_threshold_input.value(),
-            divide_const=self.divide_const_input.value(),
-        )
+        self.visualizer.mesh.low_thresh = self.low_threshold_input.value()
+        self.visualizer.mesh.high_thresh = self.high_threshold_input.value()
+        self.visualizer.mesh.normalize_counts()
         self.visualizer.refresh()
         self.statusBar().showMessage("Mesh normalized", 2500)
 

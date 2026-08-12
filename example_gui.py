@@ -19,8 +19,7 @@ def build_example_mesh():
     mesh.add(p2)
 
     # post-process: zero tiny noise (<0.12), damp very large spikes (>1.0) by dividing by 2
-    mesh.normalize_counts(low_threshold=0.12, zero_small=True,
-                          high_threshold=1.0, divide_const=2.0)
+    mesh.normalize_counts()
 
     #peaks = mesh.get_peaks(min_value=0.5, neighborhood=1)
     return mesh
