@@ -130,14 +130,17 @@ class MeshND:
     def add(
         self,
         point: Sequence[float],
+        amount: float = 1.0,
     ) -> None:
         """
         Add values distributed to the nearest cell and neighbors within `self.radius`.
 
         Args:
             point: coordinate sequence of length ndim.
+            amount: total input weight before applying the mesh kernel.
         """
         p = self._validate_point(point)
+        amount = float(amount)
 
         # Determine index ranges on each axis
         ranges = []
@@ -156,7 +159,7 @@ class MeshND:
             if dist > self.radius:
                 continue  # outside influence
 
-            val = math.exp(-0.5 * (dist / self.sigma) ** 2)
+            val = amount * math.exp(-0.5 * (dist / self.sigma) ** 2)
             self._add_at(idx, val)
 
     def get(self, *idx):

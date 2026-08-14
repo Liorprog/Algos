@@ -4,6 +4,7 @@ Each cycle adds ``SAMPLES_PER_POINT`` noisy observations around every fixed
 real point, normalizes the mesh, recomputes the global peak range, and updates
 the GUI. White circles show peak cells; red targets show the real points.
 """
+import math
 import random
 
 from PyQt5 import QtCore, QtWidgets
@@ -43,6 +44,34 @@ def peaks_as_coordinates(mesh, peaks):
     centers = mesh.get_centers()
     return [((centers[0][idx[0]], centers[1][idx[1]]), value)
             for idx, value in peaks]
+
+
+def raster_expected_mesh(mesh, real_points, noise_std):
+    """Build the expected mesh by weighted raster convolution, then normalize."""
+    mesh.reset()
+    nearest_real_indices = [mesh._nearest_index(point) for point in real_points]
+
+    for idx in mesh._all_indices():
+        center = tuple(mesh.centers[d][idx[d]] for d in range(mesh.ndim))
+        if noise_std == 0.0:
+            weight = sum(idx == real_idx for real_idx in nearest_real_indices)
+        else:
+            weight = 0.0
+            for real_point in real_points:
+                distance_squared = sum(
+                    (center[d] - real_point[d]) ** 2
+                    for d in range(mesh.ndim)
+                )
+                weight += math.exp(
+                    -0.5 * distance_squared / (noise_std * noise_std)
+                )
+
+        if weight > 0.0:
+            # add() applies the mesh kernel, so the result approximates the
+            # convolution of sample density with the normal add operation.
+            mesh.add(center, amount=weight)
+
+    mesh.normalize_counts()
 
 
 class ExperimentController(QtCore.QObject):
@@ -157,6 +186,12 @@ def add_experiment_controls(window):
     toolbar.addWidget(reset_button)
     start_button = QtWidgets.QPushButton("Start")
     toolbar.addWidget(start_button)
+    raster_button = QtWidgets.QPushButton("Raster expectation")
+    raster_button.setToolTip(
+        "Weight every grid center by all real points, convolve through add(), "
+        "then normalize once"
+    )
+    toolbar.addWidget(raster_button)
 
     toolbar.addSeparator()
     legend = QtWidgets.QLabel("Red targets = real points | White circles = peaks")
@@ -169,6 +204,7 @@ def add_experiment_controls(window):
         "random": random_button,
         "reset": reset_button,
         "start": start_button,
+        "raster": raster_button,
     }
 
 
@@ -255,6 +291,23 @@ def main():
         controller.start()
         controls["start"].setText("Pause")
 
+    def run_raster_expectation():
+        if not real_points:
+            window.statusBar().showMessage("Choose at least one real point", 2500)
+            return
+        controller.pause()
+        controls["start"].setText("Start")
+        controls["choose_points"].setChecked(False)
+        raster_expected_mesh(mesh, real_points, noise_std_input.value())
+        peaks = mesh.get_peaks(peak_param_input.value())
+        window.visualizer.set_peaks(peaks)
+        window.visualizer.refresh()
+        window.statusBar().showMessage(
+            f"Raster expectation | peak cells: {len(peaks)} | "
+            f"noise std: {noise_std_input.value():.3f} | "
+            f"max: {mesh.max_value:.3f}"
+        )
+
     controls["choose_points"].toggled.connect(
         window.visualizer.set_true_point_selection_enabled
     )
@@ -262,6 +315,7 @@ def main():
     controls["random"].clicked.connect(randomize_real_points)
     controls["reset"].clicked.connect(reset_run)
     controls["start"].clicked.connect(toggle_running)
+    controls["raster"].clicked.connect(run_raster_expectation)
     controller.finished.connect(lambda: controls["start"].setText("Start"))
     window.visualizer.true_point_selected.connect(add_real_point)
     window.visualizer.true_point_remove_requested.connect(
